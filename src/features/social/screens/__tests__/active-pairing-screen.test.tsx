@@ -1,6 +1,15 @@
-import { Share } from 'react-native';
+import {
+  DeviceEventEmitter,
+  Dimensions,
+  Keyboard,
+  Share,
+  StyleSheet,
+  TextInput,
+  View,
+} from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
+import { PairingSignalField } from '../../components/pairing-signal-field';
 import type { PairingSnapshot } from '../../net/location-sharing';
 import ActivePairingScreen from '../active-pairing-screen';
 
@@ -387,6 +396,96 @@ describe('ActivePairingScreen', () => {
     await act(async () => action('cancel link').props.onPress());
     expect(JSON.stringify(renderer.toJSON())).toContain('cannot withdraw a link');
     expect(JSON.stringify(renderer.toJSON())).toContain(LINK);
+  });
+
+  /**
+   * The paste field used to sit under the iOS keyboard with no way to put the keyboard away short
+   * of the back button, which leaves the whole screen.
+   */
+  describe('the paste field and the keyboard', () => {
+    async function renderBump() {
+      await act(async () => {
+        renderer = create(<ActivePairingScreen />);
+      });
+    }
+
+    it('puts the keyboard away on Return with an empty field, and pairs with a link in it', async () => {
+      await renderBump();
+      const field = () => renderer.root.findByType(TextInput);
+      const border = () => StyleSheet.flatten(field().props.style).borderColor;
+      const calmBorder = border();
+      await act(async () => field().props.onSubmitEditing());
+      expect(mockSharing.pairFromInput).not.toHaveBeenCalled();
+      // Not flagged as a bad submission.
+      expect(border()).toBe(calmBorder);
+
+      await act(async () => field().props.onChangeText(LINK));
+      await act(async () => field().props.onSubmitEditing());
+      expect(mockSharing.pairFromInput).toHaveBeenCalledWith(LINK);
+    });
+
+    it('dismisses the keyboard on a tap outside the controls, and claims no tap without one', async () => {
+      await renderBump();
+      const screen = renderer.root.findAllByType(View)[0];
+      const dismiss = jest.spyOn(Keyboard, 'dismiss').mockImplementation(() => {});
+      const visible = jest.spyOn(Keyboard, 'isVisible');
+
+      visible.mockReturnValue(false);
+      expect(screen.props.onStartShouldSetResponder()).toBe(false);
+
+      visible.mockReturnValue(true);
+      expect(screen.props.onStartShouldSetResponder()).toBe(true);
+      screen.props.onResponderRelease();
+      expect(dismiss).toHaveBeenCalledTimes(1);
+    });
+
+    it('lifts the panel above the keyboard and fits the field into the stage left', async () => {
+      await renderBump();
+      const field = () => renderer.root.findByType(PairingSignalField);
+      const stage = renderer.root.findAll(
+        (node) =>
+          node.type === View &&
+          node.props.onLayout &&
+          node.findAllByType(PairingSignalField).length > 0
+      );
+      // The innermost view that measures itself around the field: the stage, not the screen.
+      const layoutStage = (height: number) =>
+        act(async () =>
+          stage[stage.length - 1].props.onLayout({
+            nativeEvent: { layout: { width: 400, height } },
+          })
+        );
+      const bottomPadding = () =>
+        renderer.root
+          .findAll((node) => typeof node.type === 'string')
+          .map((node) => StyleSheet.flatten(node.props.style)?.paddingBottom)
+          .filter((padding): padding is number => typeof padding === 'number' && padding > 0);
+
+      await layoutStage(900);
+      const fullSize = field().props.size;
+      expect(fullSize).toBeGreaterThan(200);
+
+      const keyboardHeight = 300;
+      await act(async () =>
+        DeviceEventEmitter.emit('keyboardWillShow', {
+          endCoordinates: {
+            screenX: 0,
+            screenY: Dimensions.get('window').height - keyboardHeight,
+            width: 400,
+            height: keyboardHeight,
+          },
+        })
+      );
+      expect(bottomPadding()).toContain(keyboardHeight);
+
+      await layoutStage(200);
+      expect(field().props.size).toBeLessThanOrEqual(200);
+
+      await act(async () => DeviceEventEmitter.emit('keyboardWillHide', {}));
+      expect(bottomPadding()).not.toContain(keyboardHeight);
+      await layoutStage(900);
+      expect(field().props.size).toBe(fullSize);
+    });
   });
 
   it('does not share a link that finishes minting after the screen closes', async () => {

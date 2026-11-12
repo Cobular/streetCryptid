@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
   BackHandler,
+  Keyboard,
   Platform,
   Share,
   StyleSheet,
@@ -22,6 +23,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useKeyboardTop } from '@/hooks/use-keyboard-top';
 import { ThemedText } from '@/components/themed-text';
 import { resolveSignalColor } from '@/constants/signal-colors';
 import { CryptidThemes, Spacing } from '@/constants/theme';
@@ -92,6 +94,8 @@ export default function ActivePairingScreen() {
   const windowSize = useWindowDimensions();
   const [frame, setFrame] = useState<{ width: number; height: number } | null>(null);
   const { width, height } = frame ?? windowSize;
+  const [stageHeight, setStageHeight] = useState<number | null>(null);
+  const keyboardTop = useKeyboardTop();
   const reducedMotion = useReducedMotion();
   const router = useRouter();
   const params = useLocalSearchParams<{ token?: string | string[] }>();
@@ -587,6 +591,19 @@ export default function ActivePairingScreen() {
         height - insets.top - insets.bottom - SIDE_FIELD_CHROME
       )
     : Math.min(354, width - 36, Math.max(230, height * 0.42));
+  // Sized from the screen, but it has to fit the stage it is centred in: with the keyboard up the
+  // stage is a fraction of the screen, and an overflowing field draws over the back button.
+  const fittedFieldSize =
+    stageHeight == null ? fieldSize : Math.max(0, Math.min(fieldSize, stageHeight - Spacing.three));
+  const panelMargin = Math.max(insets.bottom, Spacing.two);
+  // The keyboard reports its top in window coordinates. On iOS this screen always ends at the
+  // window's bottom edge — the Settings sheet starts lower, but ends there too — and Android
+  // presents both routes full-screen, where the screen's own height is that edge.
+  const screenBottom = Platform.OS === 'ios' ? windowSize.height : height;
+  // The panel's bottom margin keeps it off the home indicator, which the keyboard covers, so the
+  // margin tucks under the keyboard rather than floating the panel a thumb's width above it.
+  const keyboardInset =
+    keyboardTop == null ? 0 : Math.max(0, screenBottom - keyboardTop - (panelMargin - Spacing.two));
   // A QR symbol must be dark-on-light whatever the theme: plenty of scanners refuse an inverted
   // one, and a code the other phone cannot read is worse than a swatch slightly off-palette.
   // Both pairs below are drawn from the theme's own extremes, so it still belongs to the screen.
@@ -822,6 +839,10 @@ export default function ActivePairingScreen() {
             : { width: layout.width, height: layout.height }
         )
       }
+      // A tap anywhere that is not a control puts the keyboard away. Controls claim their own
+      // touches first, and with the keyboard down this claims nothing at all.
+      onResponderRelease={() => Keyboard.dismiss()}
+      onStartShouldSetResponder={() => Keyboard.isVisible()}
       style={[
         styles.screen,
         { backgroundColor: chrome.bg, paddingLeft: insets.left, paddingRight: insets.right },
@@ -843,8 +864,13 @@ export default function ActivePairingScreen() {
         </PressableAction>
       </View>
 
-      <View style={sideBySide ? styles.bodyRow : styles.bodyColumn}>
-        <View style={styles.stage}>
+      <View
+        style={[sideBySide ? styles.bodyRow : styles.bodyColumn, { paddingBottom: keyboardInset }]}
+      >
+        <View
+          onLayout={({ nativeEvent: { layout } }) => setStageHeight(layout.height)}
+          style={styles.stage}
+        >
           <Animated.View
             key={stageKey}
             entering={reducedMotion ? undefined : FadeIn.duration(SWAP_IN_MS)}
@@ -879,7 +905,7 @@ export default function ActivePairingScreen() {
                   mode={presentation.fieldMode}
                   progress={countdownProgress}
                   searchStartedAt={pairing?.bump.searchStartedAt}
-                  size={fieldSize}
+                  size={fittedFieldSize}
                 />
                 <View pointerEvents="none" style={styles.readout}>
                   {presentation.readout ? (
@@ -904,7 +930,7 @@ export default function ActivePairingScreen() {
             {
               backgroundColor: chrome.island,
               borderColor: chrome.islandBorder,
-              marginBottom: Math.max(insets.bottom, Spacing.two),
+              marginBottom: panelMargin,
             },
           ]}
         >
@@ -1009,9 +1035,13 @@ export default function ActivePairingScreen() {
                   setInput(value);
                   setInputError(null);
                 }}
-                onSubmitEditing={() => void submitInput()}
+                onSubmitEditing={() => {
+                  // Return on an empty field is how a keyboard gets put away, not a bad submission.
+                  if (input.trim()) void submitInput();
+                }}
                 placeholder="Pairing link or code"
                 placeholderTextColor={chrome.steel}
+                returnKeyType="go"
                 selectionColor={signal}
                 style={[
                   styles.input,
